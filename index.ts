@@ -1,7 +1,17 @@
 import fastify from "fastify";
+import helmet from "@fastify/helmet";
+
 import * as crypto from "crypto";
+import { Database } from "sqlite3";
+import { v4 as uuidv4 } from "uuid";
 
 const server = fastify();
+server.register(helmet);
+
+const TOKEN = "dp.token.12345";
+const key = crypto.randomBytes(32).toString("hex");
+
+const db = new Database(":memory:");
 
 interface IQuerystring {
   t: string;
@@ -13,6 +23,46 @@ interface IBodystring {
 
 interface IToken {
   token: string;
+}
+
+// Use SQLite to guarantee asynchronous operation w/o race conditions
+
+function initDb() {
+  return new Promise((resolve, reject) => {
+    db.exec(
+      `CREATE TABLE tokens (
+      token VARCHAR(256) NOT NULL,
+      secret VARCHAR(256) NOT NULL
+      )`,
+      (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(true);
+        }
+      }
+    );
+  });
+}
+
+function generateToken(secret: string) {
+  return new Promise((resolve, reject) => {
+    const newToken = uuidv4();
+    const encryptedSecret = encrypt(secret, key);
+
+    db.exec(
+      `INSERT INTO tokens VALUES (
+      '${newToken}', '${encryptedSecret}'
+    )`,
+      (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(newToken);
+        }
+      }
+    );
+  });
 }
 
 // AES-256-GCM encryption using a pre-computed key and random IV
@@ -62,6 +112,12 @@ function decrypt(
   );
 }
 
+// REST API
+
+// Read
+// OP: GET /tokens?t=<TOKEN 1>,<TOKEN 2>
+// Return: { “<TOKEN 1>”: “<SECRET 1>”, “<TOKEN 2>”: “<SECRET 2>” }
+
 server.get<{
   Querystring: IQuerystring;
 }>(
@@ -80,6 +136,11 @@ server.get<{
   }
 );
 
+// Write
+// OP: PUT /tokens
+// Body: { “secret”: “<SECRET>” }
+// Return: { “token”: “<TOKEN>” }
+
 server.post(
   "/tokens",
   {
@@ -89,12 +150,22 @@ server.post(
     },
   },
   async (request, reply) => {
-    return `output token`;
+    const b: IBodystring = request.body as any;
+
+    const token = await generateToken(b.secret);
+
+    console.log(token);
+    reply.send(token);
   }
 );
 
+// Update
+// OP: PUT /tokens/<TOKEN>
+// Body: { “secret”: “<SECRET>” }
+// Return: None (status 204)
+
 server.put(
-  "/tokens",
+  "/tokens/:token",
   {
     preValidation: (request, reply, done) => {
       const b: IBodystring = request.body as any;
@@ -105,6 +176,10 @@ server.put(
     reply.code(204);
   }
 );
+
+// Delete
+// OP: DELETE /tokens/<TOKEN>
+// Return: None (status 204)
 
 server.delete(
   "/tokens/:token",
@@ -119,6 +194,7 @@ server.delete(
   }
 );
 
+initDb();
 server.listen({ port: 8080 }, (err, address) => {
   if (err) {
     console.error(err);
