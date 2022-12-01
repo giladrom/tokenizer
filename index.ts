@@ -1,14 +1,27 @@
 import fastify from "fastify";
 import helmet from "@fastify/helmet";
+import fs from "fs";
+import path from "path";
 
 import * as crypto from "crypto";
 import { Database } from "sqlite3";
 import { v4 as uuidv4 } from "uuid";
 
-const server = fastify();
-server.register(helmet);
+// Using self signed certificate
+// openssl req -nodes -new -x509 -keyout server.key -out server.cert
+// Make sure to test with curl -k
 
-const TOKEN = "dp.token.12345";
+const server = fastify({
+  http2: true,
+  https: {
+    key: fs.readFileSync("./https/server.key"),
+    cert: fs.readFileSync("./https/server.cert"),
+  },
+});
+
+// Use helmet for better HTTP header security
+
+server.register(helmet, { global: true });
 const key = crypto.randomBytes(32).toString("hex");
 
 const db = new Database(":memory:");
@@ -31,6 +44,7 @@ function initDb() {
   return new Promise((resolve, reject) => {
     db.exec(
       `CREATE TABLE tokens (
+      id integer PRIMARY KEY AUTOINCREMENT,
       token VARCHAR(256) NOT NULL,
       secret VARCHAR(256) NOT NULL
       )`,
@@ -47,13 +61,11 @@ function initDb() {
 
 function generateToken(secret: string) {
   return new Promise((resolve, reject) => {
-    const newToken = uuidv4();
+    const newToken = "dp.token." + uuidv4();
     const encryptedSecret = encrypt(secret, key);
 
     db.exec(
-      `INSERT INTO tokens VALUES (
-      '${newToken}', '${encryptedSecret}'
-    )`,
+      `INSERT INTO tokens (token, secret) VALUES ('${newToken}', '${encryptedSecret}');`,
       (err) => {
         if (err) {
           reject(err);
@@ -62,6 +74,14 @@ function generateToken(secret: string) {
         }
       }
     );
+  });
+}
+
+function getDB() {
+  return new Promise((resolve, reject) => {
+    db.all(`SELECT * FROM tokens;`, (_, res) => {
+      resolve(res);
+    });
   });
 }
 
@@ -124,15 +144,28 @@ server.get<{
   "/tokens",
   {
     preValidation: (request, reply, done) => {
-      const { t } = request.query;
-      done(t !== "token" ? new Error("Error") : undefined);
+      // Validate that all tokens match our predefined pattern
+      // Token has to be between 1-256 characters long
+
+      try {
+        const tokens = request.query;
+        const array = tokens.t.match(/dp.token.\w{1,256}/gi);
+
+        done(
+          !(Array.isArray(array) && tokens.t.split(",").length === array.length)
+            ? new Error("Error")
+            : undefined
+        );
+      } catch (e) {
+        done(new Error("Error"));
+      }
     },
   },
   async (request, reply) => {
-    const { t } = request.query;
+    const tokens = request.query as IQuerystring;
     // do something with request data
 
-    return `logged in!`;
+    return tokens.t.match(/dp.token.\w+/gi);
   }
 );
 
@@ -146,15 +179,21 @@ server.post(
   {
     preValidation: (request, reply, done) => {
       const b: IBodystring = request.body as any;
-      done(b.secret !== "token" ? new Error("Error") : undefined);
+
+      // Validate the secret matches a predefined pattern
+
+      try {
+        done(!b.secret.match(/\b\w{1,256}\b/) ? new Error("Error") : undefined);
+      } catch (e) {
+        done(new Error("Error"));
+      }
     },
   },
   async (request, reply) => {
     const b: IBodystring = request.body as any;
 
-    const token = await generateToken(b.secret);
+    const token = (await generateToken(b.secret)) as IToken;
 
-    console.log(token);
     reply.send(token);
   }
 );
@@ -169,10 +208,21 @@ server.put(
   {
     preValidation: (request, reply, done) => {
       const b: IBodystring = request.body as any;
-      done(b.secret !== "token" ? new Error("Error") : undefined);
+      const params: any = request.params;
+
+      try {
+        if (!params.token.match(/dp.token.\w{1,256}/)) {
+          done(new Error("Error"));
+        }
+
+        done(!b.secret.match(/\b\w{1,256}\b/) ? new Error("Error") : undefined);
+      } catch (e) {
+        done(new Error("Error"));
+      }
     },
   },
   async (request, reply) => {
+    console.log(request.params);
     reply.code(204);
   }
 );
@@ -193,6 +243,12 @@ server.delete(
     reply.code(204);
   }
 );
+
+//! DEBUG
+server.all("/db", async (request, reply) => {
+  return await getDB();
+});
+//! DEBUG
 
 initDb();
 server.listen({ port: 8080 }, (err, address) => {
