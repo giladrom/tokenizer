@@ -5,6 +5,8 @@ import fs from "fs";
 import * as crypto from "crypto";
 import { Database } from "sqlite3";
 import { v4 as uuidv4 } from "uuid";
+import bearerAuthPlugin from "@fastify/bearer-auth";
+import rateLimitPlugin from "@fastify/rate-limit";
 
 // Using self signed certificate
 // openssl req -nodes -new -x509 -keyout server.key -out server.cert
@@ -13,8 +15,11 @@ import { v4 as uuidv4 } from "uuid";
 //* This can be modified to restrict requests to a our internal network/subnet
 const HOSTS = "192.168.0.0/24";
 
+//* In production this will use a Doppler variable/secure keystore
+const keys = new Set(["32C8EF54-F692-46B4-A24A-AE139A73D2DA"]);
+
 const server = fastify({
-  logger: false,
+  logger: true,
   http2: true,
   https: {
     allowHTTP1: true,
@@ -28,6 +33,27 @@ const server = fastify({
 // Use helmet for better HTTP header security
 
 server.register(helmet, { global: true });
+server.register(bearerAuthPlugin, { keys });
+server.register(rateLimitPlugin, {
+  global: true,
+  max: 10,
+  timeWindow: "1 minute",
+});
+
+// Rate limit 404 response to prevent rapid guessing of valid routes
+
+server.setNotFoundHandler(
+  {
+    preValidation: (request, reply, done) => {
+      server.rateLimit();
+      done(undefined);
+    },
+  },
+  function (request, reply) {
+    reply.code(404).send({ resposne: "Error" });
+  }
+);
+
 const key = crypto.randomBytes(32).toString("hex");
 
 const db = new Database(":memory:");
