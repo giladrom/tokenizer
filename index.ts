@@ -10,6 +10,9 @@ import { v4 as uuidv4 } from "uuid";
 // openssl req -nodes -new -x509 -keyout server.key -out server.cert
 // Make sure to test with curl -k
 
+//* This can be modified to restrict requests to a our internal network/subnet
+const HOSTS = "192.168.0.0/24";
+
 const server = fastify({
   logger: false,
   http2: true,
@@ -18,15 +21,14 @@ const server = fastify({
     key: fs.readFileSync("./https/server.key"),
     cert: fs.readFileSync("./https/server.cert"),
   },
+  bodyLimit: 1024,
+  trustProxy: HOSTS,
 });
 
 // Use helmet for better HTTP header security
 
 server.register(helmet, { global: true });
 const key = crypto.randomBytes(32).toString("hex");
-
-//* This can be modified to restrict requests to a our internal network/subnet
-const HOST = "::";
 
 const db = new Database(":memory:");
 
@@ -68,8 +70,9 @@ function generateToken(secret: string) {
     const newToken = "dp.token." + uuidv4().replace(/\-/gi, "");
     const encryptedSecret = encrypt(secret, key);
 
-    db.exec(
-      `INSERT INTO tokens (token, secret) VALUES ('${newToken}', '${encryptedSecret}');`,
+    db.run(
+      `INSERT INTO tokens (token, secret) VALUES (?, ?);`,
+      [newToken, encryptedSecret],
       (err) => {
         if (err) {
           reject(err);
@@ -83,7 +86,7 @@ function generateToken(secret: string) {
 
 function retrieveSecret(token: any) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT * FROM tokens WHERE token = '${token}';`, (_, res) => {
+    db.get(`SELECT * FROM tokens WHERE token = ?;`, [token], (_, res) => {
       resolve(res);
     });
   });
@@ -93,8 +96,9 @@ function updateSecret(token: any, secret: string) {
   return new Promise((resolve, reject) => {
     const encryptedSecret = encrypt(secret, key);
 
-    db.exec(
-      `UPDATE tokens SET secret = '${encryptedSecret}' WHERE token = '${token}';`,
+    db.run(
+      `UPDATE tokens SET secret = '${encryptedSecret}' WHERE token = ?;`,
+      [token],
       (err) => {
         if (err) {
           reject(err);
@@ -108,7 +112,7 @@ function updateSecret(token: any, secret: string) {
 
 function deleteToken(token: any) {
   return new Promise((resolve, reject) => {
-    db.exec(`DELETE FROM tokens WHERE token = '${token}';`, (err) => {
+    db.run(`DELETE FROM tokens WHERE token = ?;`, [token], (err) => {
       if (err) {
         reject(err);
       } else {
@@ -195,6 +199,9 @@ server.get<{
         const tokens = request.query;
         const array = tokens.t.match(/dp.token.\w{1,256}/gi);
 
+        //* /tokens?t=dp.token.1234,dp.token.5678 -> PASS
+        //* /tokens?t=dp.token.1234,dp.token.     -> FAIL
+
         done(
           !(Array.isArray(array) && tokens.t.split(",").length === array.length)
             ? new Error("Error")
@@ -204,7 +211,6 @@ server.get<{
         done(new Error("Error"));
       }
     },
-    // constraints: { host: HOST },
   },
 
   async (request, reply) => {
@@ -276,6 +282,7 @@ server.post(
 // OP: PUT /tokens/<TOKEN>
 // Body: { “secret”: “<SECRET>” }
 // Return: None (status 204)
+//* Status: DONE
 
 server.put(
   "/tokens/:token",
@@ -307,6 +314,7 @@ server.put(
 // Delete
 // OP: DELETE /tokens/<TOKEN>
 // Return: None (status 204)
+//* Status: DONE
 
 server.delete(
   "/tokens/:token",
