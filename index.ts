@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 // Make sure to test with curl -k
 
 const server = fastify({
+  logger: false,
   http2: true,
   https: {
     key: fs.readFileSync("./https/server.key"),
@@ -61,8 +62,10 @@ function initDb() {
 
 function generateToken(secret: string) {
   return new Promise((resolve, reject) => {
-    const newToken = "dp.token." + uuidv4();
+    const newToken = "dp.token." + uuidv4().replace(/\-/gi, "");
     const encryptedSecret = encrypt(secret, key);
+
+    console.log(newToken);
 
     db.exec(
       `INSERT INTO tokens (token, secret) VALUES ('${newToken}', '${encryptedSecret}');`,
@@ -74,6 +77,14 @@ function generateToken(secret: string) {
         }
       }
     );
+  });
+}
+
+function retrieveSecret(token: any) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT secret FROM tokens WHERE token = '${token}';`, (_, res) => {
+      resolve(res);
+    });
   });
 }
 
@@ -162,10 +173,35 @@ server.get<{
     },
   },
   async (request, reply) => {
-    const tokens = request.query as IQuerystring;
-    // do something with request data
+    const query = request.query as IQuerystring;
+    const tokens = query.t.match(/dp.token.\w{1,256}/gi);
 
-    return tokens.t.match(/dp.token.\w+/gi);
+    if (tokens) {
+      try {
+        const ret = tokens.map(async (token) => {
+          try {
+            const secret = (await retrieveSecret(token)) as any;
+            const decryptedSecret = decrypt(secret.secret, key);
+
+            const values = {
+              token: token,
+              secret: decryptedSecret,
+            };
+
+            return values;
+          } catch {
+            return;
+          }
+        });
+
+        const secrets = await Promise.all(ret);
+        return secrets;
+      } catch (e) {
+        return;
+      }
+    } else {
+      return;
+    }
   }
 );
 
