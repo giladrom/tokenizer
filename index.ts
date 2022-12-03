@@ -227,6 +227,7 @@ server.get<{
 
         //* /tokens?t=dp.token.1234,dp.token.5678 -> PASS
         //* /tokens?t=dp.token.1234,dp.token.     -> FAIL
+        //* /tokens?t=                            -> FAIL
 
         done(
           !(Array.isArray(array) && tokens.t.split(",").length === array.length)
