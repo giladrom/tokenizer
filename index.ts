@@ -1,7 +1,6 @@
 import fastify from "fastify";
 import helmet from "@fastify/helmet";
 import fs from "fs";
-import path from "path";
 
 import * as crypto from "crypto";
 import { Database } from "sqlite3";
@@ -15,6 +14,7 @@ const server = fastify({
   logger: false,
   http2: true,
   https: {
+    allowHTTP1: true,
     key: fs.readFileSync("./https/server.key"),
     cert: fs.readFileSync("./https/server.cert"),
   },
@@ -24,6 +24,9 @@ const server = fastify({
 
 server.register(helmet, { global: true });
 const key = crypto.randomBytes(32).toString("hex");
+
+//* This can be modified to restrict requests to a our internal network/subnet
+const HOST = "::";
 
 const db = new Database(":memory:");
 
@@ -65,8 +68,6 @@ function generateToken(secret: string) {
     const newToken = "dp.token." + uuidv4().replace(/\-/gi, "");
     const encryptedSecret = encrypt(secret, key);
 
-    console.log(newToken);
-
     db.exec(
       `INSERT INTO tokens (token, secret) VALUES ('${newToken}', '${encryptedSecret}');`,
       (err) => {
@@ -82,12 +83,42 @@ function generateToken(secret: string) {
 
 function retrieveSecret(token: any) {
   return new Promise((resolve, reject) => {
-    db.get(`SELECT secret FROM tokens WHERE token = '${token}';`, (_, res) => {
+    db.get(`SELECT * FROM tokens WHERE token = '${token}';`, (_, res) => {
       resolve(res);
     });
   });
 }
 
+function updateSecret(token: any, secret: string) {
+  return new Promise((resolve, reject) => {
+    const encryptedSecret = encrypt(secret, key);
+
+    db.exec(
+      `UPDATE tokens SET secret = '${encryptedSecret}' WHERE token = '${token}';`,
+      (err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(true);
+        }
+      }
+    );
+  });
+}
+
+function deleteToken(token: any) {
+  return new Promise((resolve, reject) => {
+    db.exec(`DELETE FROM tokens WHERE token = '${token}';`, (err) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+}
+
+//! DEBUG
 function getDB() {
   return new Promise((resolve, reject) => {
     db.all(`SELECT * FROM tokens;`, (_, res) => {
@@ -95,6 +126,7 @@ function getDB() {
     });
   });
 }
+//!
 
 // AES-256-GCM encryption using a pre-computed key and random IV
 
@@ -148,6 +180,7 @@ function decrypt(
 // Read
 // OP: GET /tokens?t=<TOKEN 1>,<TOKEN 2>
 // Return: { “<TOKEN 1>”: “<SECRET 1>”, “<TOKEN 2>”: “<SECRET 2>” }
+//* Status: DONE
 
 server.get<{
   Querystring: IQuerystring;
@@ -171,7 +204,9 @@ server.get<{
         done(new Error("Error"));
       }
     },
+    // constraints: { host: HOST },
   },
+
   async (request, reply) => {
     const query = request.query as IQuerystring;
     const tokens = query.t.match(/dp.token.\w{1,256}/gi);
@@ -209,6 +244,7 @@ server.get<{
 // OP: PUT /tokens
 // Body: { “secret”: “<SECRET>” }
 // Return: { “token”: “<TOKEN>” }
+//* Status: DONE
 
 server.post(
   "/tokens",
@@ -230,7 +266,9 @@ server.post(
 
     const token = (await generateToken(b.secret)) as IToken;
 
-    reply.send(token);
+    reply.send({
+      token: token,
+    });
   }
 );
 
@@ -258,7 +296,10 @@ server.put(
     },
   },
   async (request, reply) => {
-    console.log(request.params);
+    const token = (request.params as any).token;
+    const secret = (request.body as IBodystring).secret;
+
+    await updateSecret(token, secret);
     reply.code(204);
   }
 );
@@ -271,11 +312,23 @@ server.delete(
   "/tokens/:token",
   {
     preValidation: (request, reply, done) => {
-      const b = request.params;
-      done(b !== "token" ? new Error("Error") : undefined);
+      const params: any = request.params;
+
+      try {
+        if (!params.token.match(/dp.token.\w{1,256}/)) {
+          done(new Error("Error"));
+        } else {
+          done(undefined);
+        }
+      } catch (e) {
+        done(new Error("Error"));
+      }
     },
   },
   async (request, reply) => {
+    const token = (request.params as any).token;
+
+    await deleteToken(token);
     reply.code(204);
   }
 );
